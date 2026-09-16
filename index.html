@@ -87,6 +87,32 @@
     .tab.active { background: #0D1B2A; color: white; border-color: #0D1B2A; }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
+    .metric.primary { border-color: #0D1B2A; box-shadow: inset 0 0 0 1px #0D1B2A; }
+    .metric.primary .metric-value { font-size: 26px; }
+    .overview-split { display: grid; grid-template-columns: 1fr 340px; gap: 1rem; align-items: start; }
+    .overview-split > .section { min-width: 0; }   /* or a wide child pushes the page sideways */
+    .overview-split .chart-section { order: 1; }
+    .overview-split .draws-panel { order: 2; }
+    .draws-panel .section-title { margin-bottom: 12px; }
+    .add-draw-btn { width: 100%; padding: 10px; font-size: 13px; font-weight: 600; background: #0D1B2A; color: white; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; margin-bottom: 12px; }
+    .add-draw-btn:hover { background: #132236; }
+    .draw-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 10px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; margin-bottom: 8px; }
+    .draw-row > div:first-child { min-width: 0; }
+    .draw-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .draw-note { font-size: 12px; color: #64748B; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+    .draw-amount { font-size: 14px; font-weight: 600; color: #059669; white-space: nowrap; }
+    .draw-running { font-size: 11px; color: #94A3B8; white-space: nowrap; margin-top: 2px; }
+    .draw-del { padding: 2px 8px; font-size: 16px; line-height: 1; color: #94A3B8; border: none; background: none; cursor: pointer; }
+    .draw-del:hover { color: #DC2626; background: none; }
+    .draws-footer { font-size: 13px; font-weight: 600; color: #0D1B2A; padding: 10px 0; border-top: 1px solid #E2E8F0; margin-top: 4px; }
+    .loan-field { border-top: 1px solid #E2E8F0; padding-top: 12px; }
+    .loan-field label { font-size: 12px; color: #64748B; display: block; margin-bottom: 4px; }
+    .loan-field input { flex: 1; min-width: 0; padding: 8px 12px; font-size: 14px; border: 1px solid #E2E8F0; border-radius: 8px; font-family: inherit; outline: none; }
+    @media (max-width: 780px) {
+      .overview-split { grid-template-columns: 1fr; }
+      .overview-split .chart-section { order: 2; }
+      .overview-split .draws-panel { order: 1; }
+    }
     .reminder-card { display: flex; align-items: center; justify-content: space-between; padding: 12px; background: #F8FAFC; border-radius: 8px; margin-bottom: 8px; border: 1px solid #E2E8F0; }
     .reminder-name { font-size: 14px; font-weight: 600; }
     .reminder-due { font-size: 12px; color: #64748B; margin-top: 2px; }
@@ -116,7 +142,7 @@
       <h1>2550 Fontana Dr</h1>
       <div class="header-right">
         <span class="last-updated" id="last-updated">Loading...</span>
-        <button onclick="loadData()">Refresh</button>
+        <button onclick="refreshAll()">Refresh</button>
       </div>
     </div>
 
@@ -170,18 +196,58 @@
     <div id="tab-overview" class="tab-content active">
     <div class="metrics">
       <div class="metric"><div class="metric-label">Total spent</div><div class="metric-value" id="m-total">--</div></div>
+      <div class="metric"><div class="metric-label">Draws received</div><div class="metric-value" id="m-draws">--</div></div>
+      <div class="metric primary"><div class="metric-label">Out of pocket</div><div class="metric-value" id="m-oop">--</div></div>
+      <div class="metric" id="m-loan-box" style="display:none;"><div class="metric-label">Loan remaining</div><div class="metric-value" id="m-loan">--</div></div>
+    </div>
+    <div class="metrics">
       <div class="metric"><div class="metric-label">Purchases</div><div class="metric-value green" id="m-purchases">--</div></div>
       <div class="metric"><div class="metric-label">Returns</div><div class="metric-value red" id="m-returns">--</div></div>
       <div class="metric"><div class="metric-label">Receipts</div><div class="metric-value" id="m-count">--</div></div>
     </div>
 
-    <div class="section">
-      <div class="section-title">Spending by category</div>
-      <div class="legend" id="chart-legend"></div>
-      <div id="chart-box" style="position:relative;width:100%;height:260px;">
-        <canvas id="catChart" role="img" aria-label="Bar chart of renovation spending by category"></canvas>
+    <div class="overview-split">
+      <div class="section draws-panel">
+        <div class="section-title">Construction Draws</div>
+        <button class="add-draw-btn" onclick="toggleDrawForm()">+ Add draw</button>
+        <div id="draw-form" style="display:none;margin-bottom:12px;">
+          <div class="modal-field">
+            <label>Date</label>
+            <input type="date" id="d-date">
+          </div>
+          <div class="modal-field">
+            <label>Amount ($)</label>
+            <input type="number" id="d-amount" step="0.01" placeholder="0.00">
+          </div>
+          <div class="modal-field">
+            <label>Note</label>
+            <input type="text" id="d-note" placeholder="e.g. framing">
+          </div>
+          <div class="modal-actions">
+            <button class="modal-btn modal-btn-cancel" onclick="toggleDrawForm()">Cancel</button>
+            <button class="modal-btn modal-btn-confirm" onclick="addDraw()">Save draw</button>
+          </div>
+        </div>
+        <div id="draw-status" class="modal-status"></div>
+        <div id="draws-list"><div class="loading">Loading draws...</div></div>
+        <div class="draws-footer" id="draws-footer">Draws so far: $0</div>
+        <div class="loan-field">
+          <label>Approved loan amount</label>
+          <div style="display:flex;gap:6px;">
+            <input type="number" id="loan-input" step="0.01" placeholder="optional">
+            <button onclick="saveLoanAmount()">Save</button>
+          </div>
+        </div>
       </div>
-      <div id="chart-note" class="error" style="display:none;">Chart could not load. The totals above and the log below are unaffected.</div>
+
+      <div class="section chart-section">
+        <div class="section-title">Spending by category</div>
+        <div class="legend" id="chart-legend"></div>
+        <div id="chart-box" style="position:relative;width:100%;height:260px;">
+          <canvas id="catChart" role="img" aria-label="Bar chart of renovation spending by category"></canvas>
+        </div>
+        <div id="chart-note" class="error" style="display:none;">Chart could not load. The totals above and the log below are unaffected.</div>
+      </div>
     </div>
 
     <div class="section">
@@ -227,8 +293,23 @@
       'MISC': '#888780'
     };
 
+    const API = 'https://fontana-bot-production.up.railway.app';
+
     let allReceipts = [];
+    let allDraws = [];          // money IN — the bank's construction loan draws
+    let approvedLoan = null;
     let catChartInstance = null;
+
+    function money(n) {
+      return '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    // Round amounts read better without the trailing .00 in the draws list.
+    function moneyShort(n) {
+      const v = Number(n) || 0;
+      const digits = Math.abs(v % 1) < 0.005 ? 0 : 2;
+      return '$' + v.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    }
 
     // A date cell comes back from the Sheets gviz feed as the string
     // "Date(2026,8,11)" — month zero-based — which is what used to land in the
@@ -267,7 +348,8 @@
         if (rows.length === 0) {
           document.getElementById('table-container').innerHTML = '<div class="loading">No receipts yet — send some photos to your Telegram bot!</div>';
           document.getElementById('last-updated').textContent = 'No data yet';
-          updateMetrics([]);
+          allReceipts = [];
+          updateMetrics();
           renderChart([]);
           return;
         }
@@ -283,7 +365,7 @@
           photo: row.c[7]?.v || ''
         }));
 
-        try { updateMetrics(allReceipts); } catch (e) { console.error('metrics', e); }
+        try { updateMetrics(); } catch (e) { console.error('metrics', e); }
         try { renderChart(allReceipts); } catch (e) { console.error('chart', e); chartUnavailable(); }
         try { renderTable(allReceipts); } catch (e) {
           console.error('table', e);
@@ -297,13 +379,181 @@
       }
     }
 
-    function updateMetrics(receipts) {
-      const purchases = receipts.filter(r => r.type === 'purchase').reduce((s, r) => s + Math.abs(r.amount), 0);
-      const returns = receipts.filter(r => r.type === 'return').reduce((s, r) => s + Math.abs(r.amount), 0);
-      document.getElementById('m-total').textContent = '$' + (purchases - returns).toFixed(2);
-      document.getElementById('m-purchases').textContent = '$' + purchases.toFixed(2);
-      document.getElementById('m-returns').textContent = '$' + returns.toFixed(2);
-      document.getElementById('m-count').textContent = receipts.length;
+    // Every number on the page comes from here, so the stat boxes, the draws
+    // panel and the Excel export can never disagree. Draws are money IN: they
+    // are never subtracted from a category or from Total spent.
+    function computeTotals() {
+      const purchases = allReceipts.filter(r => r.type === 'purchase').reduce((s, r) => s + Math.abs(r.amount), 0);
+      const returns = allReceipts.filter(r => r.type === 'return').reduce((s, r) => s + Math.abs(r.amount), 0);
+      const totalSpent = purchases - returns;
+      const drawsReceived = allDraws.reduce((s, d) => s + d.amount, 0);
+      return {
+        purchases, returns, totalSpent, drawsReceived,
+        outOfPocket: totalSpent - drawsReceived,
+        loanRemaining: approvedLoan ? approvedLoan - drawsReceived : null,
+        count: allReceipts.length
+      };
+    }
+
+    function updateMetrics() {
+      const t = computeTotals();
+      document.getElementById('m-total').textContent = money(t.totalSpent);
+      document.getElementById('m-draws').textContent = money(t.drawsReceived);
+      document.getElementById('m-oop').textContent = money(t.outOfPocket);
+      document.getElementById('m-loan-box').style.display = t.loanRemaining === null ? 'none' : '';
+      if (t.loanRemaining !== null) document.getElementById('m-loan').textContent = money(t.loanRemaining);
+      document.getElementById('m-purchases').textContent = money(t.purchases);
+      document.getElementById('m-returns').textContent = money(t.returns);
+      document.getElementById('m-count').textContent = t.count;
+    }
+
+    // ---- Construction draws ----
+
+    function drawDate(iso) {
+      const d = new Date(String(iso) + 'T00:00:00');
+      return isNaN(d) ? (iso || '') : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function drawStatus(text, kind) {
+      const el = document.getElementById('draw-status');
+      el.className = 'modal-status' + (kind ? ' ' + kind : '');
+      el.style.display = text ? 'block' : 'none';
+      el.textContent = text || '';
+    }
+
+    function applyDraws(data) {
+      // Oldest first, so Draw 1 is the first money the bank put in.
+      allDraws = (data.draws || []).slice().sort((a, b) =>
+        String(a.date).localeCompare(String(b.date)) || a.row - b.row);
+      approvedLoan = data.approved_loan_amount || null;
+      const loanInput = document.getElementById('loan-input');
+      if (document.activeElement !== loanInput) loanInput.value = approvedLoan || '';
+      renderDraws();
+      updateMetrics();
+    }
+
+    async function loadDraws() {
+      try {
+        const res = await fetch(API + '/draws');
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Server error ' + res.status);
+        applyDraws(data);
+      } catch (e) {
+        document.getElementById('draws-list').innerHTML =
+          `<div class="error">Could not load draws.<br><small>${e.message}</small></div>`;
+        document.getElementById('draws-footer').textContent = '';
+      }
+    }
+
+    function renderDraws() {
+      const list = document.getElementById('draws-list');
+      const t = computeTotals();
+
+      let running = 0;
+      const numbered = allDraws.map((d, i) => {
+        running += d.amount;
+        return { ...d, number: i + 1, running };
+      });
+
+      list.innerHTML = numbered.length === 0
+        ? '<div class="loading">No draws yet.</div>'
+        : numbered.slice().reverse().map(d => `
+          <div class="draw-row">
+            <div>
+              <div class="draw-name">Draw ${d.number} · ${drawDate(d.date)}</div>
+              ${d.note ? `<div class="draw-note">${d.note}</div>` : ''}
+            </div>
+            <div style="text-align:right;">
+              <div class="draw-amount">${moneyShort(d.amount)}</div>
+              <div class="draw-running">${moneyShort(d.running)} total</div>
+            </div>
+            <button class="draw-del" title="Delete this draw"
+              onclick="deleteDraw(${d.row}, ${d.amount}, ${d.number})">×</button>
+          </div>`).join('');
+
+      document.getElementById('draws-footer').textContent =
+        'Draws so far: ' + moneyShort(t.drawsReceived) +
+        (approvedLoan ? ' of ' + moneyShort(approvedLoan) : '');
+    }
+
+    function toggleDrawForm() {
+      const form = document.getElementById('draw-form');
+      const showing = form.style.display === 'none';
+      form.style.display = showing ? 'block' : 'none';
+      drawStatus('');
+      if (showing) {
+        document.getElementById('d-date').value = new Date().toISOString().split('T')[0];
+        document.getElementById('d-amount').value = '';
+        document.getElementById('d-note').value = '';
+      }
+    }
+
+    async function addDraw() {
+      const date = document.getElementById('d-date').value;
+      const amount = parseFloat(document.getElementById('d-amount').value);
+      const note = document.getElementById('d-note').value.trim();
+      if (!date) return drawStatus('Pick the date you drew the money.', 'error');
+      if (!amount || amount <= 0) return drawStatus('Enter the amount of the draw.', 'error');
+
+      drawStatus('Saving...');
+      try {
+        const res = await fetch(API + '/add-draw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date, amount, note })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Server error ' + res.status);
+        applyDraws(data);
+        document.getElementById('draw-form').style.display = 'none';
+        drawStatus('Draw added.', 'success');
+        setTimeout(() => drawStatus(''), 2000);
+      } catch (e) {
+        drawStatus('Error: ' + e.message, 'error');
+      }
+    }
+
+    async function deleteDraw(row, amount, number) {
+      if (!confirm('Delete Draw ' + number + ' — ' + moneyShort(amount) + '?')) return;
+      drawStatus('Deleting...');
+      try {
+        const res = await fetch(API + '/delete-draw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ row, amount })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Server error ' + res.status);
+        applyDraws(data);
+        drawStatus('Draw deleted.', 'success');
+        setTimeout(() => drawStatus(''), 2000);
+      } catch (e) {
+        drawStatus('Error: ' + e.message, 'error');
+      }
+    }
+
+    async function saveLoanAmount() {
+      const raw = document.getElementById('loan-input').value.trim();
+      drawStatus('Saving...');
+      try {
+        const res = await fetch(API + '/set-loan-amount', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount: raw === '' ? 0 : parseFloat(raw) })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Server error ' + res.status);
+        applyDraws(data);
+        drawStatus('Loan amount saved.', 'success');
+        setTimeout(() => drawStatus(''), 2000);
+      } catch (e) {
+        drawStatus('Error: ' + e.message, 'error');
+      }
+    }
+
+    function refreshAll() {
+      loadData();
+      loadDraws();
     }
 
     function chartUnavailable() {
@@ -388,9 +638,21 @@
       ];
       const cats = {};
       allReceipts.filter(r => r.type === 'purchase').forEach(r => { cats[r.category] = (cats[r.category] || 0) + Math.abs(r.amount); });
+      const t = computeTotals();
+      let running = 0;
+      const draw_data = [
+        ['Draw', 'Date', 'Amount', 'Note', 'Running total'],
+        ...allDraws.map((d, i) => { running += d.amount; return [i + 1, d.date, d.amount, d.note, running]; }),
+        [],
+        ['Total spent', t.totalSpent],
+        ['Draws received', t.drawsReceived],
+        ['Out of pocket', t.outOfPocket],
+        ...(t.loanRemaining === null ? [] : [['Approved loan amount', approvedLoan], ['Loan remaining', t.loanRemaining]])
+      ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ws_data), 'Receipts');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Category', 'Total'], ...Object.entries(cats)]), 'By Category');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(draw_data), 'Draws');
       XLSX.writeFile(wb, 'renovation-receipts.xlsx');
     }
 
@@ -779,7 +1041,7 @@
         document.getElementById('lock-screen').style.display = 'none';
         document.getElementById('main-content').style.display = 'block';
         loadStartDate().then(() => { updateTimer(); setInterval(updateTimer, 1000); });
-        loadData();
+        refreshAll();
       } else {
         document.getElementById('pwd-error').style.display = 'block';
         document.getElementById('pwd-input').value = '';

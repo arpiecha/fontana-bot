@@ -168,6 +168,152 @@ def check_duplicate(receipt: dict) -> bool:
         logger.warning(f"Duplicate check failed: {e}")
         return False
 
+# --- Construction loan draws -------------------------------------------------
+# Money OUT is Sheet1 (the receipts). Money IN is the Draws tab: what the bank
+# has actually paid out. The two never mix — a draw is not a negative expense,
+# so nothing here ever touches a category total.
+
+DRAWS_TAB = "Draws"
+DRAWS_HEADERS = ["Date", "Amount ($)", "Note"]
+SETTINGS_TAB = "Settings"
+SETTINGS_HEADERS = ["Setting", "Value"]
+LOAN_SETTING = "Approved Loan Amount"
+
+_tabs_ready = False
+
+
+def _sheet_ids(sheets_service) -> dict:
+    meta = sheets_service.spreadsheets().get(
+        spreadsheetId=GOOGLE_SHEET_ID, fields="sheets.properties(sheetId,title)"
+    ).execute()
+    return {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta.get("sheets", [])}
+
+
+def ensure_draw_tabs():
+    """Create the Draws and Settings tabs with their headers if they aren't there.
+
+    Same idea as ensure_sheet_headers(), so a sheet that has never seen a draw
+    works on the first click instead of erroring.
+    """
+    global _tabs_ready
+    if _tabs_ready:
+        return
+    _, sheets_service = get_google_services()
+    ids = _sheet_ids(sheets_service)
+    missing = [t for t in (DRAWS_TAB, SETTINGS_TAB) if t not in ids]
+    if missing:
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": t}}} for t in missing]}
+        ).execute()
+    for tab, headers in ((DRAWS_TAB, DRAWS_HEADERS), (SETTINGS_TAB, SETTINGS_HEADERS)):
+        existing = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID, range=f"{tab}!A1:C1"
+        ).execute()
+        if not existing.get("values"):
+            sheets_service.spreadsheets().values().update(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=f"{tab}!A1",
+                valueInputOption="USER_ENTERED",
+                body={"values": [headers]}
+            ).execute()
+    _tabs_ready = True
+
+
+def to_amount(value) -> float:
+    """A number out of whatever the sheet or the form hands over."""
+    try:
+        return float(str(value).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def read_draws() -> list:
+    """Every draw, oldest row first, each carrying the sheet row it lives on."""
+    ensure_draw_tabs()
+    _, sheets_service = get_google_services()
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GOOGLE_SHEET_ID, range=f"{DRAWS_TAB}!A2:C"
+    ).execute()
+    draws = []
+    for i, row in enumerate(result.get("values", [])):
+        date = normalize_date(row[0]) if len(row) > 0 else ""
+        amount = to_amount(row[1]) if len(row) > 1 else 0.0
+        note = row[2] if len(row) > 2 else ""
+        if not date and not amount:
+            continue                      # blank row someone left behind
+        draws.append({"row": i + 2, "date": date, "amount": amount, "note": note})
+    return draws
+
+
+def append_draw(date: str, amount: float, note: str):
+    ensure_draw_tabs()
+    _, sheets_service = get_google_services()
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range=f"{DRAWS_TAB}!A:C",
+        valueInputOption="USER_ENTERED",
+        body={"values": [[normalize_date(date), amount, note]]}
+    ).execute()
+
+
+def remove_draw(row_number: int, expect_amount=None):
+    """Delete one draw row. The amount is checked first so a stale page can't
+    delete the wrong draw after the list has shifted."""
+    draws = read_draws()
+    target = next((d for d in draws if d["row"] == row_number), None)
+    if target is None:
+        raise ValueError("That draw is no longer there — refresh and try again.")
+    if expect_amount is not None and round(to_amount(expect_amount) * 100) != round(target["amount"] * 100):
+        raise ValueError("That draw has changed — refresh and try again.")
+    _, sheets_service = get_google_services()
+    sheet_id = _sheet_ids(sheets_service)[DRAWS_TAB]
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        body={"requests": [{"deleteDimension": {"range": {
+            "sheetId": sheet_id, "dimension": "ROWS",
+            "startIndex": row_number - 1, "endIndex": row_number
+        }}}]}
+    ).execute()
+
+
+def get_loan_amount():
+    """The approved loan amount, or None if it was never set."""
+    ensure_draw_tabs()
+    _, sheets_service = get_google_services()
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GOOGLE_SHEET_ID, range=f"{SETTINGS_TAB}!A2:B"
+    ).execute()
+    for row in result.get("values", []):
+        if len(row) >= 2 and str(row[0]).strip().lower() == LOAN_SETTING.lower():
+            return to_amount(row[1]) or None
+    return None
+
+
+def set_loan_amount(amount):
+    ensure_draw_tabs()
+    _, sheets_service = get_google_services()
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GOOGLE_SHEET_ID, range=f"{SETTINGS_TAB}!A2:B"
+    ).execute()
+    rows = result.get("values", [])
+    for i, row in enumerate(rows):
+        if row and str(row[0]).strip().lower() == LOAN_SETTING.lower():
+            sheets_service.spreadsheets().values().update(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=f"{SETTINGS_TAB}!A{i + 2}:B{i + 2}",
+                valueInputOption="USER_ENTERED",
+                body={"values": [[LOAN_SETTING, amount]]}
+            ).execute()
+            return
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range=f"{SETTINGS_TAB}!A:B",
+        valueInputOption="USER_ENTERED",
+        body={"values": [[LOAN_SETTING, amount]]}
+    ).execute()
+
+
 def append_to_sheet(receipt: dict, drive_link: str):
     _, sheets_service = get_google_services()
     amount = -receipt["total"] if receipt["type"] == "return" else receipt["total"]
@@ -744,6 +890,67 @@ def add_reminder_endpoint():
         logger.error(f"Add reminder endpoint error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+def draws_payload():
+    return {'success': True, 'draws': read_draws(), 'approved_loan_amount': get_loan_amount()}
+
+
+@flask_app.route('/draws', methods=['GET'])
+def draws_endpoint():
+    try:
+        return jsonify(draws_payload())
+    except Exception as e:
+        logger.error(f"Draws endpoint error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@flask_app.route('/add-draw', methods=['POST'])
+def add_draw_endpoint():
+    try:
+        data = request.json or {}
+        date = str(data.get('date', '')).strip()
+        amount = to_amount(data.get('amount'))
+        note = str(data.get('note', '')).strip()
+        if not date:
+            return jsonify({'success': False, 'error': 'A draw needs a date.'}), 400
+        if amount <= 0:
+            return jsonify({'success': False, 'error': 'A draw needs an amount.'}), 400
+        append_draw(date, amount, note)
+        return jsonify(draws_payload())
+    except Exception as e:
+        logger.error(f"Add draw endpoint error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@flask_app.route('/delete-draw', methods=['POST'])
+def delete_draw_endpoint():
+    try:
+        data = request.json or {}
+        row = int(data.get('row', 0))
+        if row < 2:
+            return jsonify({'success': False, 'error': 'Which draw?'}), 400
+        remove_draw(row, data.get('amount'))
+        return jsonify(draws_payload())
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 409
+    except Exception as e:
+        logger.error(f"Delete draw endpoint error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@flask_app.route('/set-loan-amount', methods=['POST'])
+def set_loan_amount_endpoint():
+    try:
+        data = request.json or {}
+        amount = to_amount(data.get('amount'))
+        if amount < 0:
+            return jsonify({'success': False, 'error': 'That is not an amount.'}), 400
+        set_loan_amount(amount if amount else "")
+        return jsonify(draws_payload())
+    except Exception as e:
+        logger.error(f"Set loan amount endpoint error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @flask_app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok'})
@@ -760,6 +967,10 @@ def run_flask():
 
 def main():
     ensure_sheet_headers()
+    try:
+        ensure_draw_tabs()
+    except Exception as e:
+        logger.warning(f"Could not prepare the Draws tabs yet: {e}")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("chatid", chatid))
