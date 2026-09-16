@@ -106,6 +106,68 @@ def upload_to_dropbox(image_bytes: bytes, filename: str) -> str:
         logger.warning(f"Dropbox upload failed: {e}")
         return "Photo not saved"
 
+def normalize_date(value) -> str:
+    """A date as YYYY-MM-DD, whatever shape the sheet hands back.
+
+    Rows are written with USER_ENTERED, so Sheets turns "2026-09-11" into a
+    real date cell and reads it back in the sheet's own format ("9/11/2026").
+    Comparing the raw strings would never match, so both sides come through
+    here first.
+    """
+    text = str(value).strip()
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d", "%d/%m/%Y", "%m-%d-%Y", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return text   # unparseable: compare as-is rather than guess
+
+
+def check_duplicate(receipt: dict) -> bool:
+    """Flag a receipt whose total AND date both match one already in the sheet."""
+    try:
+        _, sheets_service = get_google_services()
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID, range="Sheet1!A:E"
+        ).execute()
+        rows = result.get("values", [])[1:]  # Skip header
+
+        new_date = normalize_date(receipt.get("date", ""))
+        try:
+            # Compare whole cents: 66.54 and 66.55 are different receipts, and
+            # subtracting floats puts them 0.00999... apart, inside any epsilon.
+            total = float(receipt.get("total", 0))
+            # Returns are written to the sheet negative, so sign this the same
+            # way or a re-sent return could never match its own row.
+            if str(receipt.get("type", "")).lower() == "return":
+                total = -abs(total)
+            new_cents = round(total * 100)
+        except:
+            new_cents = 0
+
+        for row in rows:
+            if len(row) >= 5:
+                try:
+                    existing_cents = round(float(str(row[4]).replace("$","").replace(",","").strip()) * 100)
+                except:
+                    existing_cents = None
+
+                # Check amount first (most unique identifier)
+                if existing_cents != new_cents:
+                    continue
+
+                # Amount matches — a duplicate only if it is the same day too
+                same_date = bool(new_date) and normalize_date(row[0]) == new_date
+                if same_date:
+                    logger.info(f"Duplicate: {new_cents / 100:.2f} on {new_date} is already in the sheet")
+                    return True
+        return False
+    except Exception as e:
+        logger.warning(f"Duplicate check failed: {e}")
+        return False
+
 def append_to_sheet(receipt: dict, drive_link: str):
     _, sheets_service = get_google_services()
     amount = -receipt["total"] if receipt["type"] == "return" else receipt["total"]
@@ -148,7 +210,7 @@ async def analyze_receipt(image_bytes: bytes, mime_type: str) -> dict:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     logger.info(f"Sending image to Claude, size: {len(image_bytes)} bytes, mime: {mime_type}")
     message = client.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-5",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=[{
@@ -250,6 +312,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 drive_link = "Manual entry - no photo"
                 photo_line = "\n📝 Manual entry — no photo"
+            if check_duplicate(receipt):
+                await query.edit_message_text(
+                    "Duplicate detected! A receipt with the same date and amount already exists. Save anyway?",
+
+
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Save anyway", callback_data="confirm_force")],
+                        [InlineKeyboardButton("❌ Discard", callback_data="discard")]
+                    ])
+                )
+                pending_corrections[chat_id]["duplicate_check"] = True
+                return
             append_to_sheet(receipt, drive_link)
             sign = "-" if receipt["type"] == "return" else "+"
             await query.edit_message_text(
@@ -264,6 +339,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Save error: {e}")
             await query.edit_message_text(f"❌ Error saving: {str(e)}\n\nCheck your Google credentials.")
+
+    elif data == "confirm_force":
+        await query.edit_message_text("💾 Saving entry...")
+        try:
+            filename = f"receipt_{receipt['store'].replace(' ', '_')}_{receipt['date']}_{int(datetime.now().timestamp())}"
+            if pending["image_bytes"]:
+                drive_link = upload_to_dropbox(pending["image_bytes"], filename)
+                photo_line = f"\n🗂 [View photo]({drive_link})"
+            else:
+                drive_link = "Manual entry - no photo"
+                photo_line = "\n📝 Manual entry"
+            append_to_sheet(receipt, drive_link)
+            sign = "-" if receipt["type"] == "return" else "+"
+            await query.edit_message_text(
+                "Entry saved! " + receipt["store"] + " " + sign + "$" + f"{receipt['total']:.2f}" + " (" + receipt["category"] + ")" + photo_line,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+            del pending_corrections[chat_id]
+        except Exception as e:
+            logger.error(f"Force save error: {e}")
+            await query.edit_message_text(f"Error saving: {str(e)}")
 
     elif data == "fix_amount":
         pending_corrections[chat_id]["awaiting_amount"] = True
@@ -313,7 +410,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def parse_manual_entry(text: str) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-5",
         max_tokens=500,
         system="""You are a receipt parser. The user will describe a purchase in natural language.
 Extract details and respond ONLY with a JSON object, no markdown, no extra text:
@@ -453,7 +550,7 @@ async def handle_reminder_request(update, text: str):
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-5",
             max_tokens=200,
             system='You extract bill reminder info. Always respond with ONLY this JSON format, nothing else: {"name": "BillName", "day": 15} where day is an integer between 1-31. If the user says "15th" the day is 15. If the user says "1st" the day is 1. Never return null for day.',
             messages=[{"role": "user", "content": text}]
@@ -554,7 +651,7 @@ async def handle_cancel_reminder(update, text: str):
     # Use AI to figure out which bill to cancel
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-5",
         max_tokens=100,
         system='Extract the bill name the user wants to cancel. Respond ONLY with the bill name, nothing else. Example: "ComEd" or "Nicor" or "Mortgage".',
         messages=[{"role": "user", "content": text}]
@@ -606,6 +703,9 @@ def save_endpoint():
             'items': data.get('items', '').split(', '),
             'notes': data.get('notes', '')
         }
+        force = data.get('force', False)
+        if not force and check_duplicate(receipt):
+            return jsonify({'success': False, 'duplicate': True, 'error': 'Duplicate receipt detected — same date and amount already exists.'})
         
         image_b64 = data.get('image_base64')
         if image_b64:
